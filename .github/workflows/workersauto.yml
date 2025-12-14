@@ -1,0 +1,62 @@
+name: Sync and CloudFlare
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # 手动触发
+  schedule:
+    - cron: '0 0 * * *'  # 每天 UTC 00:00 同步一次
+
+jobs:
+  sync-and-prepare:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'push' || github.actor != 'github-actions[bot]'  # 避免 push 循环（可选）
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}  # 如果需要 push，用 PAT（Personal Access Token）
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Sync with upstream
+        run: |
+          git remote add upstream ${{ secrets.UPSTREAM_REPO }}
+          git fetch upstream
+          git checkout main
+          git merge upstream/main --allow-unrelated-histories --no-ff -m "Auto-sync upstream changes"
+          git push origin main  # push 合并后的变更（触发 Cloudflare 构建）
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install OpenNext Cloudflare Adapter
+        run: npm install -D @opennextjs/cloudflare@latest
+
+      - name: Dynamically generate minimal wrangler.toml
+        run: |
+          cat << EOF > wrangler.toml
+          name = "tjwiki"  # 替换为您的 Workers 项目名
+          compatibility_date = "2025-12-14"  # 当前或更晚日期
+          compatibility_flags = ["nodejs_compat"]
+
+          main = ".open-next/server-function/index.js"
+          [assets]
+          bucket = ".open-next/assets"
+          EOF
+          git add wrangler.toml
+          git commit -m "Auto-generate minimal wrangler.toml (no vars)" || echo "No changes to commit"
+
+      - name: Push changes to trigger CloudFlare build
+        run: |
+          git push origin main
+
+      - name: Post-sync notification
+        run: |
+          echo "Synced upstream and prepared wrangler.toml. CloudFlare will auto-build on push."
+          echo "Remember: Add environment variables (Supabase etc.) in CloudFlare Dashboard > Workers > Settings > Variables."
